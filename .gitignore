@@ -1,1 +1,4 @@
 .env
+__pycache__/
+session_log.json
+.DS_Store
