@@ -1,0 +1,88 @@
+name: Deploy QUAL-AI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'projects/qual_ai/**'
+  workflow_dispatch:
+
+env:
+  GCP_REGION: us-central1
+  SERVICE_NAME: qual-ai
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: read
+      id-token: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v1
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+      
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v1
+      
+      - name: Configure Docker for GCR
+        run: |
+          gcloud auth configure-docker gcr.io
+      
+      - name: Build and push Docker image
+        run: |
+          cd projects/qual_ai
+          docker build \
+            -t gcr.io/${{ secrets.GCP_PROJECT_ID }}/qual-ai:latest \
+            -t gcr.io/${{ secrets.GCP_PROJECT_ID }}/qual-ai:${{ github.sha }} \
+            .
+          docker push gcr.io/${{ secrets.GCP_PROJECT_ID }}/qual-ai:latest
+          docker push gcr.io/${{ secrets.GCP_PROJECT_ID }}/qual-ai:${{ github.sha }}
+      
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy $SERVICE_NAME \
+            --image gcr.io/${{ secrets.GCP_PROJECT_ID }}/qual-ai:latest \
+            --platform managed \
+            --region $GCP_REGION \
+            --allow-unauthenticated \
+            --set-env-vars ENVIRONMENT=production
+      
+      - name: Get service URL
+        run: |
+          gcloud run services describe $SERVICE_NAME \
+            --platform managed \
+            --region $GCP_REGION \
+            --format='value(status.url)'
+      
+      - name: Run health check
+        run: |
+          SERVICE_URL=$(gcloud run services describe $SERVICE_NAME \
+            --platform managed \
+            --region $GCP_REGION \
+            --format='value(status.url)')
+          
+          sleep 10
+          
+          curl -f $SERVICE_URL/health || exit 1
+
+  notify:
+    needs: build-and-deploy
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Notify deployment status
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ QUAL-AI deployment successful"
+          else
+            echo "❌ QUAL-AI deployment failed"
+          fi
